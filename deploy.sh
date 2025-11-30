@@ -11,14 +11,14 @@
 #   and an HTML report emailed to the deployment mailing list.
 #
 # Usage:
-#   ./deploy.sh <branch-suffix-or-trunk> <component-or-ALL>
+#   ./deploy.sh <branch-suffix-or-trunk> <single component-or-ALL>
 #
 #   Examples:
 #     # Deploy all components from trunk
 #     ./deploy.sh trunk ALL
 #
-#     # Deploy specific components for branch suffix '123'
-#     ./deploy.sh 123 componentA,componentB
+#     # Deploy specific components for branch suffix 'p62'
+#     ./deploy.sh p62 componentA,componentB
 #
 # Execution help:
 #   - The script writes a timestamped log to the path configured in
@@ -28,9 +28,8 @@
 #       2) a single component name, a comma-separated list, or `ALL`
 #   - Run interactively to follow progress; the script exits with code
 #     0 on success or non-zero when any component deployment failed.
-#   - Example (dry run approach): inspect the list file at
-#     $LIST_FILE and test individual scp/ssh operations manually before
-#     running the full script in production.
+#    - it also sends an HTML email report summarizing the deployment to give email IDs
+#  
 #
 # Notes:
 #   - This script expects certain paths and utilities to exist
@@ -39,6 +38,36 @@
 #     related configuration should be managed externally (e.g. via
 #     ~/.ssh, ssh-agent, or an external secrets manager).
 # ------------------------------------------------------------------
+
+usage() {
+cat <<'USAGE'
+Usage: ./deploy.sh <trunk or p62 > <lobbyapi-or-ALL>
+
+Positional arguments:
+    <branch-suffix-or-trunk>   Branch suffix (e.g. p62) or the literal "trunk"
+    <component-or-ALL>         Single component name, a comma-separated list, or the word ALL
+
+Options:
+    -h, --help                 Show this help message and exit
+
+Examples:
+    ./deploy.sh trunk ALL
+    ./deploy.sh p62 lobbyapi,webservices
+
+Notes:
+    - This script performs real deployments (scp, symlink updates, chown,
+        and a health check). Review the CONFIGURATION section at the top of
+        the file before running in production.
+    - SSH keys and other sensitive configuration must be managed externally
+        
+USAGE
+}
+
+# Print help and exit if requested
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+        usage
+        exit 0
+fi
 
 set -euo pipefail
 
@@ -67,6 +96,29 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# ------------------------------------------------------------------
+# Global configuration (centralized)
+# Move email/report/health variables here so they're easy to find.
+# ------------------------------------------------------------------
+# Email / report
+MAIL_TO="anil.pedavelli@boydinteractive.com"
+MAIL_FROM="deployment@boydinteractive.com"
+# Template used to build the final MAIL_SUBJECT at runtime. Tokens: {BRANCH}, {HOST}, {DATE}
+MAIL_SUBJECT_TEMPLATE="Deployment Report | Branch: {BRANCH} | Host: {HOST} | {DATE}"
+FINAL_REPORT="/tmp/deployment_report_final.html"
+
+# Health check files & credentials
+STATUS_FILE="/var/tmp/tomcat_status"
+SUMMARY_FILE="/var/tmp/tomcat_summary.log"
+TUPWD="test"
+
+# Tomcat wait configuration
+# TOTAL_TIMEOUT: total seconds to wait for Tomcat to begin listening on port 8080
+# SLEEP_INTERVAL: seconds between checks
+TOTAL_TIMEOUT=420   # 7 minutes
+SLEEP_INTERVAL=5
+
 
 timestamp() { date '+%F %T'; }
 
@@ -345,12 +397,45 @@ else
 fi
 
 ############################################
+# WAIT FOR TOMCAT PORT
+############################################
+echo "Waiting for Tomcat (port 8080) to become available..." | tee -a "$LOGFILE" || true
+TIME_WAITED=0
+FOUND=0
+while true; do
+    if command -v ss >/dev/null 2>&1; then
+        if ss -tnlp 2>/dev/null | grep -q ':8080'; then
+            FOUND=1; break
+        fi
+    elif command -v netstat >/dev/null 2>&1; then
+        if netstat -tnlp 2>/dev/null | grep -q ':8080'; then
+            FOUND=1; break
+        fi
+    else
+        # As a last resort try curl to localhost:8080 root (may 404 but will connect)
+        if curl --max-time 5 -sS http://127.0.0.1:8080/ >/dev/null 2>&1; then
+            FOUND=1; break
+        fi
+    fi
+
+    if (( TIME_WAITED >= TOTAL_TIMEOUT )); then
+        echo "ERROR: Tomcat did not start listening on port 8080 within ${TOTAL_TIMEOUT}s." | tee -a "$LOGFILE" || true
+        break
+    fi
+    sleep "$SLEEP_INTERVAL"
+    TIME_WAITED=$((TIME_WAITED + SLEEP_INTERVAL))
+done
+
+if [[ $FOUND -eq 1 ]]; then
+    echo "Tomcat is now listening on port 8080 (waited ${TIME_WAITED}s)." | tee -a "$LOGFILE" || true
+else
+    echo "Continuing to health checks even though Tomcat did not appear to listen on port 8080." | tee -a "$LOGFILE" || true
+fi
+
+############################################
 # TOMCAT HEALTH CHECK
 ############################################
 echo "===== Running Tomcat Application Health Check =====" | tee -a "$LOGFILE" || true
-STATUS_FILE=/var/tmp/tomcat_status
-SUMMARY_FILE=/var/tmp/tomcat_summary.log
-tupwd=test
 > "$STATUS_FILE" || true
 > "$SUMMARY_FILE" || true
 
@@ -454,10 +539,12 @@ exit_code=0
 ############################################
 # HTML REPORT & EMAIL
 ############################################
-MAIL_TO="anil.pedavelli@boydinteractive.com"
-MAIL_FROM="deployment@boydinteractive.com"
-MAIL_SUBJECT="Deployment Report | Branch: $BRANCH | Host: $SERVER_HOST | $(date '+%F %T')"
-FINAL_REPORT="/tmp/deployment_report_final.html"
+# `MAIL_TO`, `MAIL_FROM`, `MAIL_SUBJECT_TEMPLATE`, and `FINAL_REPORT`
+# are defined in the top-level configuration. Build the runtime subject
+# by substituting tokens in the template.
+MAIL_SUBJECT="${MAIL_SUBJECT_TEMPLATE//\{BRANCH\}/$BRANCH}"
+MAIL_SUBJECT="${MAIL_SUBJECT//\{HOST\}/$SERVER_HOST}"
+MAIL_SUBJECT="${MAIL_SUBJECT//\{DATE\}/$(date '+%F %T')}"
 
 declare -A HEALTH_MAP
 declare -A VERSION_MAP
