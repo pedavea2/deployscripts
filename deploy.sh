@@ -442,15 +442,33 @@ else
     echo "Continuing to health checks even though Tomcat did not appear to listen on port 8080." | tee -a "$LOGFILE" || true
 fi
 
+# If Tomcat never came up, mark all health checks as FAILED and skip runtime checks.
+SKIP_HEALTH=0
+if [[ $FOUND -ne 1 ]]; then
+    echo "Tomcat not detected on port 8080; marking all applications as FAILED for health checks." | tee -a "$LOGFILE" || true
+    > "$STATUS_FILE" || true
+    > "$SUMMARY_FILE" || true
+    FAILED_HEALTH_CHECKS=()
+    for app in "${COMPONENT_LIST[@]}"; do
+        echo "$app: FAILED" >> "$SUMMARY_FILE" || true
+        FAILED_HEALTH_CHECKS+=("$app")
+    done
+    SKIP_HEALTH=1
+fi
+
 ############################################
 # TOMCAT HEALTH CHECK
 ############################################
 echo "===== Running Tomcat Application Health Check =====" | tee -a "$LOGFILE" || true
-> "$STATUS_FILE" || true
-> "$SUMMARY_FILE" || true
 
-declare -A HEALTHCHECK_DIR_MAP
-for app in "${COMPONENT_LIST[@]}"; do
+if [[ "${SKIP_HEALTH:-0}" -eq 1 ]]; then
+    echo "Skipping per-application health checks because Tomcat is not listening on port 8080." | tee -a "$LOGFILE" || true
+else
+    > "$STATUS_FILE" || true
+    > "$SUMMARY_FILE" || true
+
+    declare -A HEALTHCHECK_DIR_MAP
+    for app in "${COMPONENT_LIST[@]}"; do
     case "$app" in
         AdminEdgeV2)
             CURRENT_LINK=$(readlink "$WAR_BASE/AdminEdge/AdminEdge" || true)
@@ -499,7 +517,7 @@ for app in "${COMPONENT_LIST[@]}"; do
 
     echo "Checking $app status" | tee -a "$LOGFILE" || true
     /usr/lib64/nagios/plugins/check_TomcatApplication.sh \
-        -u tadmin -p "$tupwd" --host localhost -P 8080 -a "$app" >> "$STATUS_FILE" 2>&1 || true
+        -u tadmin -p "$TUPWD" --host localhost -P 8080 -a "$app" >> "$STATUS_FILE" 2>&1 || true
 
     if grep -qi "CRITICAL" "$STATUS_FILE"; then
         echo -e "$app: ${RED}FAILED${NC}" | tee -a "$LOGFILE" || true
@@ -510,7 +528,8 @@ for app in "${COMPONENT_LIST[@]}"; do
         PASSED_HEALTH_CHECKS+=("$app")
         echo "$app: OK" >> "$SUMMARY_FILE" || true
     fi
-done
+    done
+fi
 
 
 ############################################
