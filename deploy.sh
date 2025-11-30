@@ -59,6 +59,7 @@ Notes:
         and a health check). Review the CONFIGURATION section at the top of
         the file before running in production.
     - SSH keys and other sensitive configuration must be managed externally
+    - Use `-n` or `--dry-run` to skip Tomcat restart while still running health checks.
         
 USAGE
 }
@@ -78,7 +79,27 @@ LOGFILE="/var/log/deployment/component_deploy_$(date +%d%m%y%H%M).log"
 exec > >(tee -a "$LOGFILE") 2>&1
 
 BRANCH_INPUT="$1"
-COMPONENT_INPUT="$2"
+# Parse optional flags first (supports -n/--dry-run). Use parameter expansions
+# like "${1:-}" to stay compatible with `set -u`.
+DRY_RUN=0
+while [[ "${1:-}" == -* ]]; do
+    case "${1:-}" in
+        -n|--dry-run)
+            DRY_RUN=1; shift ;;
+        -h|--help)
+            usage; exit 0 ;;
+        *)
+            echo "$(timestamp): ERROR: Unknown option ${1:-}"; usage; exit 1 ;;
+    esac
+done
+
+BRANCH_INPUT="${1:-}"
+COMPONENT_INPUT="${2:-}"
+
+if [[ -z "${BRANCH_INPUT:-}" || -z "${COMPONENT_INPUT:-}" ]]; then
+    echo "$(timestamp): ERROR: Missing required positional arguments." | tee -a "$LOGFILE" || true
+    usage; exit 1
+fi
 
 SCP_KEY="$HOME/.ssh/javabuild_dsa"
 JENKINS_HOST="javabuild04"
@@ -493,16 +514,20 @@ done
 ############################################
 echo "===== Tomcat Restart Section ====="
 if $restart_needed; then
-    echo "===== Tomcat Restart Initiated =====" | tee -a "$LOGFILE" || true
-    /sbin/service tomcat stop || true
-    sleep 5 || true
-    TOMCAT_PID=$(ps -ef | grep tomcat | grep java | awk '{print $2}' || true)
-    [[ -n "$TOMCAT_PID" ]] && kill -9 $TOMCAT_PID || true
-    sleep 2 || true
-    rm -rf /usr/local/tomcat/work/Catalina/localhost/* || true
-    # /sbin/service tomcat start || true
-    echo "Not restarting Tomcat (testing mode)" | tee -a "$LOGFILE" || true
-    sleep 5 || true
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        echo "DRY-RUN: Skipping Tomcat restart (restart_needed=true)" | tee -a "$LOGFILE" || true
+    else
+        echo "===== Tomcat Restart Initiated =====" | tee -a "$LOGFILE" || true
+        /sbin/service tomcat stop || true
+        sleep 5 || true
+        TOMCAT_PID=$(ps -ef | grep tomcat | grep java | awk '{print $2}' || true)
+        [[ -n "$TOMCAT_PID" ]] && kill -9 $TOMCAT_PID || true
+        sleep 2 || true
+        rm -rf /usr/local/tomcat/work/Catalina/localhost/* || true
+        # /sbin/service tomcat start || true
+        echo "Not restarting Tomcat (testing mode)" | tee -a "$LOGFILE" || true
+        sleep 5 || true
+    fi
 else
     echo ">>> Tomcat restart not required" | tee -a "$LOGFILE" || true
 fi
@@ -543,18 +568,26 @@ else
     echo "Continuing to health checks even though Tomcat did not appear to listen on port 8080." | tee -a "$LOGFILE" || true
 fi
 
-# If Tomcat never came up, mark all health checks as FAILED and skip runtime checks.
+# If Tomcat never came up, decide behavior based on DRY_RUN:
+# - In normal mode (DRY_RUN=0) mark all as FAILED and skip per-app checks.
+# - In dry-run mode (DRY_RUN=1) allow health checks to run even if port 8080
+#   was not detected (they will likely fail, but we still attempt them).
 SKIP_HEALTH=0
 if [[ $FOUND -ne 1 ]]; then
-    echo "Tomcat not detected on port 8080; marking all applications as FAILED for health checks." | tee -a "$LOGFILE" || true
-    > "$STATUS_FILE" || true
-    > "$SUMMARY_FILE" || true
-    FAILED_HEALTH_CHECKS=()
-    for app in "${COMPONENT_LIST[@]}"; do
-        echo "$app: FAILED" >> "$SUMMARY_FILE" || true
-        FAILED_HEALTH_CHECKS+=("$app")
-    done
-    SKIP_HEALTH=1
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        echo "Tomcat not detected on port 8080; DRY-RUN enabled — will attempt health checks anyway." | tee -a "$LOGFILE" || true
+        SKIP_HEALTH=0
+    else
+        echo "Tomcat not detected on port 8080; marking all applications as FAILED for health checks." | tee -a "$LOGFILE" || true
+        > "$STATUS_FILE" || true
+        > "$SUMMARY_FILE" || true
+        FAILED_HEALTH_CHECKS=()
+        for app in "${COMPONENT_LIST[@]}"; do
+            echo "$app: FAILED" >> "$SUMMARY_FILE" || true
+            FAILED_HEALTH_CHECKS+=("$app")
+        done
+        SKIP_HEALTH=1
+    fi
 fi
 
 ############################################
