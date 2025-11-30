@@ -122,6 +122,107 @@ SLEEP_INTERVAL=5
 
 timestamp() { date '+%F %T'; }
 
+# Report sending guard: ensure we send the HTML report exactly once,
+# even if the script exits early (for example due to an unbound variable
+# when `set -u` is enabled). The EXIT trap below calls `send_report`.
+REPORT_SENT=0
+
+send_report() {
+    # Avoid double-send
+    if [[ "${REPORT_SENT:-0}" -ne 0 ]]; then
+        return 0
+    fi
+    REPORT_SENT=1
+
+    # Ensure SUMMARY_FILE exists (may have been created earlier)
+    > "${SUMMARY_FILE}" 2>/dev/null || true
+
+    declare -A HEALTH_MAP
+    declare -A VERSION_MAP
+
+    for app in "${COMPONENT_LIST[@]}"; do
+        status_line=$(grep "^$app:" "${SUMMARY_FILE}" 2>/dev/null || true)
+        status=$(echo "$status_line" | awk -F: '{print $2}' | xargs || true)
+        color_status="red"
+        [[ "$status" == "OK" ]] && color_status="green"
+        HEALTH_MAP["$app"]="<span style='color:$color_status;font-weight:bold;'>${status:-UNKNOWN}</span>"
+
+        if [[ "$app" == "AdminEdgeV2" ]]; then
+            version_file="$WAR_BASE/AdminEdge/AdminEdge.current_version"
+        else
+            version_file="$WAR_BASE/$app.current_version"
+        fi
+
+        VERSION_MAP["$app"]="$(cat "$version_file" 2>/dev/null || echo "N/A")"
+    done
+
+    MAIL_SUBJECT="${MAIL_SUBJECT_TEMPLATE//\{BRANCH\}/$BRANCH}"
+    MAIL_SUBJECT="${MAIL_SUBJECT//\{HOST\}/$SERVER_HOST}"
+    MAIL_SUBJECT="${MAIL_SUBJECT//\{DATE\}/$(date '+%F %T')}"
+
+    {
+    echo "<html><body style='font-family: Arial, sans-serif;'>"
+    echo "<h2>🖥️ Deployment Report</h2>"
+    echo "<p><strong>Server:</strong> $SERVER_HOST<br>"
+    echo "<strong>Branch:</strong> $BRANCH<br>"
+    echo "<strong>Date:</strong> $(date '+%F %T')<br>"
+    echo "<strong>Log file:</strong> $SERVER_HOST:$LOGFILE</p>"
+
+    echo "<h3>Component Summary</h3>"
+    echo "<ul>"
+    echo "<li><strong>Attempted:</strong> ${COMPONENT_LIST[*]}</li>"
+    echo "<li><strong>Deployed:</strong> ${deployed_components[*]:-None}</li>"
+    echo "<li><strong>Skipped:</strong> ${skipped_components[*]:-None}</li>"
+    echo "<li><strong style='color:red;'>Failed:</strong> ${failed_components[*]:-None}</li>"
+    echo "</ul>"
+
+    echo "<h3>Tomcat Health Status</h3>"
+    echo "<table style='border-collapse: collapse; width: 70%;'>"
+    echo "<tr><th style='border: 1px solid #ddd; padding: 8px; text-align:left;'>Application</th>"
+    echo "<th style='border: 1px solid #ddd; padding: 8px;'>Status</th>"
+    echo "<th style='border: 1px solid #ddd; padding: 8px;'>Version</th></tr>"
+
+    for app in "${COMPONENT_LIST[@]}"; do
+        echo "<tr>"
+        echo "<td style='border: 1px solid #ddd; padding: 8px;'>$app</td>"
+        echo "<td style='border: 1px solid #ddd; padding: 8px;'>${HEALTH_MAP[$app]}</td>"
+        echo "<td style='border: 1px solid #ddd; padding: 8px;'>${VERSION_MAP[$app]}</td>"
+        echo "</tr>"
+    done
+    echo "</table>"
+
+    if [[ ${#failed_components[@]} -ne 0 ]]; then
+        echo "<p style='color:red;font-weight:bold;'>❌ Deployment completed with errors</p>"
+    else
+        echo "<p style='color:green;font-weight:bold;'>✅ Deployment completed successfully</p>"
+    fi
+
+    echo "<h3>Notes</h3>"
+    echo "<ul>"
+    echo "<li>Skipped components were already on the latest version or not present on this server.</li>"
+    echo "<li>For full details, check the log file listed above.</li>"
+    echo "</ul>"
+    echo "</body></html>"
+    } > "$FINAL_REPORT"
+
+    {
+        echo "Subject: $MAIL_SUBJECT"
+        echo "From: $MAIL_FROM"
+        echo "To: $MAIL_TO"
+        echo "Content-Type: text/html"
+        echo
+        cat "$FINAL_REPORT"
+    } | /usr/sbin/sendmail -t || true
+}
+
+trap_on_exit() {
+    rc=$?
+    # Ensure we attempt to send the report even on early exit
+    send_report || true
+    exit $rc
+}
+
+trap trap_on_exit EXIT
 ############################################
 # BRANCH LOGIC
 ############################################
