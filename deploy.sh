@@ -208,11 +208,18 @@ if [[ "$COMPONENT_INPUT" == "ALL" && ${#PLUGIN_PATTERNS[@]} -gt 0 ]]; then
         echo -e "${BLUE}  - Processing plugin pattern: $pattern${NC}"
         SRC_PATH="/usr/local/hudson/jobs/$BRANCH/lastStable/archive/$pattern/target/*.jar"
 
-        if ! scp -o StrictHostKeyChecking=yes -i "$SCP_KEY" \
-            root@"$JENKINS_HOST":"$SRC_PATH" "$PLUGIN_DIR/" 2>/tmp/plugin_copy_error.log || true; then
-            echo -e "${YELLOW}    WARNING: No JAR found for $pattern${NC}"
-        else
+        # Use a straightforward conditional: scp exit status indicates success/failure.
+        # Redirect stderr to a temp file and show a short snippet on failure for debugging.
+        ERRFILE="/tmp/plugin_copy_error_${pattern//[^a-zA-Z0-9_.-]/_}.log"
+        if scp -o StrictHostKeyChecking=yes -i "$SCP_KEY" \
+            root@"$JENKINS_HOST":"$SRC_PATH" "$PLUGIN_DIR/" 2>"$ERRFILE"; then
             echo -e "${GREEN}    OK: Copied plugin(s) for $pattern${NC}"
+            rm -f "$ERRFILE" 2>/dev/null || true
+        else
+            echo -e "${YELLOW}    WARNING: No JAR found or scp failed for $pattern${NC}"
+            if [[ -s "$ERRFILE" ]]; then
+                echo "    Details: $(head -n 4 "$ERRFILE" | tr -d '\n' )"
+            fi
         fi
     done
 else
