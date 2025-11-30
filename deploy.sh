@@ -359,6 +359,12 @@ failed_components=()
 skipped_components=()
 deployed_components=()
 
+# Ensure health-check arrays are always defined to avoid unbound-variable errors
+# (they may be populated later or by the Tomcat-not-up fast-path).
+PASSED_HEALTH_CHECKS=()
+SKIPPED_HEALTH_CHECKS=()
+FAILED_HEALTH_CHECKS=()
+
 for API in "${COMPONENT_LIST[@]}"; do
     echo
     echo -e "${BLUE}********** Deploying Component: $API *********${NC}"
