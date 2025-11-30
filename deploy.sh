@@ -214,6 +214,9 @@ if [[ "$COMPONENT_INPUT" == "ALL" && ${#PLUGIN_PATTERNS[@]} -gt 0 ]]; then
         if scp -o StrictHostKeyChecking=yes -i "$SCP_KEY" \
             root@"$JENKINS_HOST":"$SRC_PATH" "$PLUGIN_DIR/" 2>"$ERRFILE"; then
             echo -e "${GREEN}    OK: Copied plugin(s) for $pattern${NC}"
+            # Ensure any downloaded jars are owned by tomcat (ignore errors if none)
+            chown tomcat: "$PLUGIN_DIR"/*.jar 2>/dev/null || true
+            echo -e "${GREEN}    Ownership updated: tomcat for plugin JARs (if present)${NC}"
             rm -f "$ERRFILE" 2>/dev/null || true
         else
             echo -e "${YELLOW}    WARNING: No JAR found or scp failed for $pattern${NC}"
